@@ -1,0 +1,9 @@
+[package]
+name = "bevy_ecs_dynamic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bevy_ecs = { version = "0.8", default-features = false }
+fixedbitset = "0.4.2"
