@@ -74,21 +74,26 @@ impl FetchKind {
         }
     }
 
-    fn update_component_access(&self, access: &mut FilteredAccess<ComponentId>) {
+    fn update_component_access(
+        &self,
+        access: &mut FilteredAccess<ComponentId>,
+    ) -> Result<(), QueryError> {
         match *self {
             FetchKind::Ref(id) => {
-                assert!(!access.access().has_write(id),"&{:?} conflicts with a previous access in this query. Shared access cannot coincide with exclusive access.", id);
+                if access.access().has_write(id) {
+                    return Err(QueryError::ConflicingAccessFetch(*self));
+                }
                 access.add_read(id);
             }
             FetchKind::RefMut(id) => {
-                assert!(
-                    !access.access().has_read(id),
-                    "&mut {:?} conflicts with a previous access in this query. Mutable component access must be unique.",
-                    id,
-                );
+                if access.access().has_read(id) {
+                    return Err(QueryError::ConflicingAccessFetch(*self));
+                }
                 access.add_write(id)
             }
         }
+
+        Ok(())
     }
 }
 
@@ -125,26 +130,54 @@ impl FilterKind {
         }
     }
 
-    fn update_component_access(&self, access: &mut FilteredAccess<ComponentId>) {
+    fn update_component_access(
+        &self,
+        access: &mut FilteredAccess<ComponentId>,
+    ) -> Result<(), QueryError> {
         match *self {
             FilterKind::With(id) => access.add_with(id),
             FilterKind::Without(id) => access.add_without(id),
             FilterKind::Changed(id) => {
                 if access.access().has_write(id) {
-                    panic!("With<{:?}> conflicts with a previous access in this query. Shared access cannot coincide with exclusive access.", id);
+                    return Err(QueryError::ConflicingAccessFilter(*self));
                 }
                 access.add_read(id);
             }
             FilterKind::Added(id) => {
                 if access.access().has_write(id) {
-                    panic!("Added<{:?}> conflicts with a previous access in this query. Shared access cannot coincide with exclusive access.", id);
+                    return Err(QueryError::ConflicingAccessFilter(*self));
                 }
                 access.add_read(id);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub enum QueryError {
+    ConflicingAccessFilter(FilterKind),
+    ConflicingAccessFetch(FetchKind),
+}
+
+impl std::fmt::Display for QueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryError::ConflicingAccessFilter(filter) => {
+                write!(f, "{filter:?} conflicts with a previous access in this query. Shared access cannot coincide with exclusive access.")
+            }
+            QueryError::ConflicingAccessFetch(fetch @ FetchKind::Ref(_)) => {
+                write!(f ,"{fetch:?} conflicts with a previous access in this query. Shared access cannot coincide with exclusive access.")
+            }
+            QueryError::ConflicingAccessFetch(fetch @ FetchKind::RefMut(_)) => {
+                write!(f, "{fetch:?} conflicts with a previous access in this query. Mutable component access must be unique.")
             }
         }
     }
 }
 
+impl std::error::Error for QueryError {}
 struct ComponentFetchState<'w> {
     table_components: Option<Ptr<'w>>,
     entity_table_rows: Option<ThinSlicePtr<'w, usize>>,
@@ -557,11 +590,16 @@ pub struct DynamicQuery {
 }
 
 impl DynamicQuery {
-    pub fn new(world: &World, component_fetches: Vec<FetchKind>, filters: Vec<FilterKind>) -> Self {
+    pub fn new(
+        world: &World,
+        component_fetches: Vec<FetchKind>,
+        filters: Vec<FilterKind>,
+    ) -> Result<Self, QueryError> {
         let mut component_access = FilteredAccess::default();
         component_fetches
             .iter()
-            .for_each(|fetch| fetch.update_component_access(&mut component_access));
+            .map(|fetch| fetch.update_component_access(&mut component_access))
+            .collect::<Result<_, _>>()?;
 
         // Use a temporary empty FilteredAccess for filters. This prevents them from conflicting with the
         // main Query's `fetch_state` access. Filters are allowed to conflict with the main query fetch
@@ -569,7 +607,8 @@ impl DynamicQuery {
         let mut filter_component_access = FilteredAccess::default();
         filters
             .iter()
-            .for_each(|filter| filter.update_component_access(&mut filter_component_access));
+            .map(|filter| filter.update_component_access(&mut filter_component_access))
+            .collect::<Result<_, _>>()?;
 
         // Merge the temporary filter access with the main access. This ensures that filter access is
         // properly considered in a global "cross-query" context (both within systems and across systems).
@@ -588,7 +627,8 @@ impl DynamicQuery {
             archetype_component_access: Default::default(),
         };
         query.update_archetypes(world);
-        query
+
+        Ok(query)
     }
 
     fn validate_world(&self, world: &World) {
@@ -813,7 +853,8 @@ mod tests {
         let mut world = World::new();
         let component_id = world.init_component::<TestComponent1>();
 
-        let mut query = DynamicQuery::new(&world, vec![FetchKind::Ref(component_id)], vec![]);
+        let mut query =
+            DynamicQuery::new(&world, vec![FetchKind::Ref(component_id)], vec![]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 0);
     }
@@ -837,7 +878,8 @@ mod tests {
                 FetchKind::RefMut(component_id_2),
             ],
             vec![],
-        );
+        )
+        .unwrap();
 
         let results: Vec<_> = query.iter_mut(&mut world).collect();
         assert_eq!(results.len(), 1);
@@ -862,11 +904,13 @@ mod tests {
         world.spawn().insert(TestComponent1).insert(TestComponent2);
         world.spawn().insert(TestComponent1);
 
-        let mut query = DynamicQuery::new(&world, vec![], vec![FilterKind::With(component_id_2)]);
+        let mut query =
+            DynamicQuery::new(&world, vec![], vec![FilterKind::With(component_id_2)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 1);
 
-        let mut query = DynamicQuery::new(&world, vec![], vec![FilterKind::With(component_id_1)]);
+        let mut query =
+            DynamicQuery::new(&world, vec![], vec![FilterKind::With(component_id_1)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 2);
     }
@@ -881,30 +925,34 @@ mod tests {
         world.spawn().insert(TestComponent1);
 
         let mut query =
-            DynamicQuery::new(&world, vec![], vec![FilterKind::Without(component_id_2)]);
+            DynamicQuery::new(&world, vec![], vec![FilterKind::Without(component_id_2)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 1);
 
         let mut query =
-            DynamicQuery::new(&world, vec![], vec![FilterKind::Without(component_id_1)]);
+            DynamicQuery::new(&world, vec![], vec![FilterKind::Without(component_id_1)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 0);
     }
 
     #[test]
-    #[should_panic = "&ComponentId(0) conflicts with a previous access in this query"]
+    #[should_panic = "Ref(ComponentId(0)) conflicts with a previous access in this query"]
     fn query_component_access_valid() {
         let mut world = World::new();
         let component_id_1 = world.init_component::<TestComponent1>();
 
-        DynamicQuery::new(
+        let err = DynamicQuery::new(
             &world,
             vec![
                 FetchKind::RefMut(component_id_1),
                 FetchKind::Ref(component_id_1),
             ],
             vec![],
-        );
+        )
+        .map(drop)
+        .unwrap_err();
+
+        panic!("{err}");
     }
 
     #[test]
@@ -914,14 +962,16 @@ mod tests {
 
         world.spawn().insert(TestComponent1);
 
-        let mut query = DynamicQuery::new(&world, vec![], vec![FilterKind::Added(component_id_1)]);
+        let mut query =
+            DynamicQuery::new(&world, vec![], vec![FilterKind::Added(component_id_1)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 1);
 
         world.increment_change_tick();
         world.clear_trackers();
 
-        let mut query = DynamicQuery::new(&world, vec![], vec![FilterKind::Added(component_id_1)]);
+        let mut query =
+            DynamicQuery::new(&world, vec![], vec![FilterKind::Added(component_id_1)]).unwrap();
         let count = query.iter_mut(&mut world).count();
         assert_eq!(count, 0);
     }
