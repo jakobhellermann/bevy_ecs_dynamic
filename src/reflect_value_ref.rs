@@ -237,8 +237,13 @@ pub struct ReflectValueRefQueryIter<'w, 's> {
     components: Vec<(ComponentId, ReflectFromPtr)>,
 }
 
+pub struct ReflectValueRefQueryItem {
+    pub entity: Entity,
+    pub items: Vec<ReflectValueRef>,
+}
+
 impl<'w, 's> Iterator for ReflectValueRefQueryIter<'w, 's> {
-    type Item = Vec<ReflectValueRef>;
+    type Item = ReflectValueRefQueryItem;
 
     fn next(&mut self) -> Option<Self::Item> {
         let item = self.iter.next()?;
@@ -256,7 +261,10 @@ impl<'w, 's> Iterator for ReflectValueRefQueryIter<'w, 's> {
             })
             .collect();
 
-        Some(items)
+        Some(ReflectValueRefQueryItem {
+            entity: item.entity,
+            items,
+        })
     }
 }
 
@@ -302,7 +310,7 @@ mod tests {
         let results: Vec<_> = query.iter(&world).collect();
         assert_eq!(results.len(), 1);
 
-        match results[0].as_slice() {
+        match results[0].items.as_slice() {
             [a, b] => {
                 assert_eq!(a.component_id(), component_id_1);
                 assert_eq!(b.component_id(), component_id_2);
