@@ -629,6 +629,13 @@ impl DynamicQuery {
         Ok(query)
     }
 
+    pub fn fetches(&self) -> &[FetchKind] {
+        &self.component_fetches
+    }
+    pub fn filters(&self) -> &[FilterKind] {
+        &self.filters
+    }
+
     fn validate_world(&self, world: &World) {
         assert!(
             world.id() == self.world_id,
