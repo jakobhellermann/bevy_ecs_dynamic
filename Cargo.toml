@@ -6,4 +6,5 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 bevy_ecs = { version = "0.8", default-features = false }
+bevy_reflect = "0.8.0"
 fixedbitset = "0.4.2"
