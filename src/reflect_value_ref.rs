@@ -5,7 +5,7 @@ use bevy_ecs::component::ComponentId;
 use bevy_ecs::prelude::*;
 use bevy_ecs::ptr::Ptr;
 use bevy_ecs::{change_detection::MutUntyped, world::WorldId};
-use bevy_reflect::{GetPath, Reflect, ReflectFromPtr, TypeRegistry};
+use bevy_reflect::{GetPath, Reflect, ReflectFromPtr, TypeRegistryArc};
 
 #[derive(Debug, Clone, Copy)]
 pub enum WorldValueBase {
@@ -114,9 +114,10 @@ fn get_reflect_from_ptr(
         .ok_or_else(|| ReflectValueRefError::NoTypeId(component_id))?;
 
     let type_registry = world
-        .get_resource::<TypeRegistry>()
+        .get_resource::<TypeRegistryArc>()
         .ok_or(ReflectValueRefError::TypeRegistryNotInWorld)?;
     let reflect_from_ptr = type_registry
+        .read()
         .get_type_data::<ReflectFromPtr>(type_id)
         .ok_or_else(|| ReflectValueRefError::NoReflectFromPtr(component_id))?
         .clone();
@@ -340,7 +341,7 @@ impl<'w, 's> Iterator for ReflectValueRefQueryIter<'w, 's> {
 #[cfg(test)]
 mod tests {
     use bevy_ecs::prelude::*;
-    use bevy_reflect::{Reflect, TypeRegistry};
+    use bevy_reflect::{Reflect, TypeRegistryArc};
 
     use super::ReflectValueRefQuery;
 
@@ -363,9 +364,12 @@ mod tests {
         let component_id_1 = world.init_component::<TestComponent1>();
         let component_id_2 = world.init_component::<TestComponent2>();
 
-        let mut type_registry = world.get_resource_or_insert_with(TypeRegistry::new);
-        type_registry.register::<TestComponent1>();
-        type_registry.register::<TestComponent2>();
+        let type_registry = world.get_resource_or_insert_with(TypeRegistryArc::default);
+        {
+            let mut type_registry = type_registry.write();
+            type_registry.register::<TestComponent1>();
+            type_registry.register::<TestComponent2>();
+        }
 
         world.spawn().insert(TestComponent1 { value: "no".into() });
         world.spawn().insert_bundle((
