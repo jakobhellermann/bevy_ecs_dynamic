@@ -8,14 +8,14 @@ use bevy_ecs::{change_detection::MutUntyped, world::WorldId};
 use bevy_reflect::{GetPath, Reflect, ReflectFromPtr, TypeRegistry};
 
 #[derive(Debug, Clone, Copy)]
-enum WorldValueBase {
+pub enum WorldValueBase {
     Component(Entity, ComponentId),
     Resource(ComponentId),
 }
 
 #[allow(clippy::needless_lifetimes)] // i'd rather be explicit around world references
 impl WorldValueBase {
-    fn access<'w>(self, world: &'w World) -> Option<Ptr<'w>> {
+    pub fn access<'w>(self, world: &'w World) -> Option<Ptr<'w>> {
         match self {
             WorldValueBase::Component(entity, component_id) => {
                 world.get_by_id(entity, component_id)
@@ -24,7 +24,7 @@ impl WorldValueBase {
         }
     }
 
-    fn access_mut<'w>(self, world: &'w mut World) -> Option<MutUntyped<'w>> {
+    pub fn access_mut<'w>(self, world: &'w mut World) -> Option<MutUntyped<'w>> {
         match self {
             WorldValueBase::Component(entity, component_id) => {
                 world.get_mut_by_id(entity, component_id)
@@ -33,7 +33,7 @@ impl WorldValueBase {
         }
     }
 
-    fn component_id(self) -> ComponentId {
+    pub fn component_id(self) -> ComponentId {
         match self {
             WorldValueBase::Component(_, id) => id,
             WorldValueBase::Resource(id) => id,
@@ -59,17 +59,70 @@ impl std::fmt::Debug for ReflectValueRef {
     }
 }
 
-fn get_reflect_from_ptr(world: &World, component_id: ComponentId) -> Option<ReflectFromPtr> {
-    let info = world.components().get_info(component_id)?;
-    let type_id = info.type_id()?;
+#[derive(Debug)]
+pub enum ReflectValueRefError {
+    InexistentComponent(ComponentId),
+    TypeRegistryNotInWorld,
+    NoTypeId(ComponentId),
+    NoReflectFromPtr(ComponentId),
+    InvalidBaseValue(WorldValueBase),
+    InvalidPath(String),
+}
 
-    let type_registry = world.get_resource::<TypeRegistry>()?;
+impl std::error::Error for ReflectValueRefError {}
+impl std::fmt::Display for ReflectValueRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReflectValueRefError::InexistentComponent(id) => {
+                write!(f, "Component {id:?} does not exist")
+            }
+            ReflectValueRefError::TypeRegistryNotInWorld => {
+                write!(f, "no `TypeRegistry` exists in the world")
+            }
+            ReflectValueRefError::NoTypeId(id) => write!(
+                f,
+                "Component {id:?} has no associated `TypeId` and can't be reflected"
+            ),
+            ReflectValueRefError::NoReflectFromPtr(id) => write!(
+                f,
+                "Component {id:?} has no registered `ReflectFromPtr` type data"
+            ),
+            ReflectValueRefError::InvalidBaseValue(WorldValueBase::Component(entity, id)) => {
+                write!(
+                    f,
+                    "The world has no component {id:?} at the entity {entity:?}"
+                )
+            }
+            ReflectValueRefError::InvalidBaseValue(WorldValueBase::Resource(id)) => {
+                write!(f, "The world has no resource {id:?}")
+            }
+            ReflectValueRefError::InvalidPath(msg) => write!(f, "invalid path: {msg}"),
+        }
+    }
+}
+
+fn get_reflect_from_ptr(
+    world: &World,
+    component_id: ComponentId,
+) -> Result<ReflectFromPtr, ReflectValueRefError> {
+    let info = world
+        .components()
+        .get_info(component_id)
+        .ok_or_else(|| ReflectValueRefError::InexistentComponent(component_id))?;
+    let type_id = info
+        .type_id()
+        .ok_or_else(|| ReflectValueRefError::NoTypeId(component_id))?;
+
+    let type_registry = world
+        .get_resource::<TypeRegistry>()
+        .ok_or(ReflectValueRefError::TypeRegistryNotInWorld)?;
     let reflect_from_ptr = type_registry
-        .get_type_data::<ReflectFromPtr>(type_id)?
+        .get_type_data::<ReflectFromPtr>(type_id)
+        .ok_or_else(|| ReflectValueRefError::NoReflectFromPtr(component_id))?
         .clone();
     assert_eq!(reflect_from_ptr.type_id(), type_id);
 
-    Some(reflect_from_ptr)
+    Ok(reflect_from_ptr)
 }
 
 impl ReflectValueRef {
@@ -77,11 +130,11 @@ impl ReflectValueRef {
         world: &World,
         entity: Entity,
         component_id: ComponentId,
-    ) -> Option<ReflectValueRef> {
+    ) -> Result<ReflectValueRef, ReflectValueRefError> {
         let reflect_from_ptr = get_reflect_from_ptr(world, component_id)?;
         let base = WorldValueBase::Component(entity, component_id);
 
-        Some(ReflectValueRef {
+        Ok(ReflectValueRef {
             base,
             world_id: world.id(),
             reflect_from_ptr,
@@ -106,11 +159,14 @@ impl ReflectValueRef {
         }
     }
 
-    pub fn resource(world: &World, component_id: ComponentId) -> Option<ReflectValueRef> {
+    pub fn resource(
+        world: &World,
+        component_id: ComponentId,
+    ) -> Result<ReflectValueRef, ReflectValueRefError> {
         let reflect_from_ptr = get_reflect_from_ptr(world, component_id)?;
         let base = WorldValueBase::Resource(component_id);
 
-        Some(ReflectValueRef {
+        Ok(ReflectValueRef {
             base,
             world_id: world.id(),
             reflect_from_ptr,
@@ -138,25 +194,36 @@ impl ReflectValueRef {
         self.base.component_id()
     }
 
-    pub fn get<'w>(&self, world: &'w World) -> Option<&'w dyn Reflect> {
+    pub fn get<'w>(&self, world: &'w World) -> Result<&'w dyn Reflect, ReflectValueRefError> {
         assert_eq!(self.world_id, world.id());
 
-        let ptr = self.base.access(world)?;
+        let ptr = self
+            .base
+            .access(world)
+            .ok_or_else(|| ReflectValueRefError::InvalidBaseValue(self.base))?;
         // SAFETY:
         // `val` is a pointer to value of the type that the `ReflectFromPtr` was constructed for,
         // because the mapping from `ComponentId -> TypeId` is immutable and `ReflectFromPtr` is checked to be
         // for the type of the `WorldBase`'s type id.
         let reflect = unsafe { self.reflect_from_ptr.as_reflect_ptr(ptr) };
 
-        let reflect = reflect.path(&self.path).ok()?;
+        let reflect = reflect
+            .path(&self.path)
+            .map_err(|e| ReflectValueRefError::InvalidPath(e.to_string()))?;
 
-        Some(reflect)
+        Ok(reflect)
     }
 
-    pub fn get_mut<'w>(&self, world: &'w mut World) -> Option<&'w mut dyn Reflect> {
+    pub fn get_mut<'w>(
+        &self,
+        world: &'w mut World,
+    ) -> Result<&'w mut dyn Reflect, ReflectValueRefError> {
         assert_eq!(self.world_id, world.id());
 
-        let mut ptr = self.base.access_mut(world)?;
+        let mut ptr = self
+            .base
+            .access_mut(world)
+            .ok_or_else(|| ReflectValueRefError::InvalidBaseValue(self.base))?;
 
         // TODO: don't mark as changed on every access
         ptr.set_changed();
@@ -167,9 +234,11 @@ impl ReflectValueRef {
         // for the type of the `WorldBase`'s type id.
         let reflect = unsafe { self.reflect_from_ptr.as_reflect_ptr_mut(ptr.into_inner()) };
 
-        let reflect = reflect.path_mut(&self.path).ok()?;
+        let reflect = reflect
+            .path_mut(&self.path)
+            .map_err(|e| ReflectValueRefError::InvalidPath(e.to_string()))?;
 
-        Some(reflect)
+        Ok(reflect)
     }
 
     /// Appends a new path to the reflect path offset of the [`ReflectValueRef`]
