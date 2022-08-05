@@ -503,12 +503,12 @@ impl<'w> ComponentFilterState<'w> {
         match self.kind {
             FilterKind::With(_) | FilterKind::Without(_) => true,
             FilterKind::Changed(_) => ComponentTicks::is_changed(
-                &*(self.change_detection.table_ticks.unwrap().get(table_row)).deref(),
+                (self.change_detection.table_ticks.unwrap().get(table_row)).deref(),
                 self.change_detection.last_change_tick,
                 self.change_detection.change_tick,
             ),
             FilterKind::Added(_) => ComponentTicks::is_added(
-                &*(self.change_detection.table_ticks.unwrap().get(table_row)).deref(),
+                (self.change_detection.table_ticks.unwrap().get(table_row)).deref(),
                 self.change_detection.last_change_tick,
                 self.change_detection.change_tick,
             ),
@@ -598,8 +598,7 @@ impl DynamicQuery {
         let mut component_access = FilteredAccess::default();
         component_fetches
             .iter()
-            .map(|fetch| fetch.update_component_access(&mut component_access))
-            .collect::<Result<_, _>>()?;
+            .try_for_each(|fetch| fetch.update_component_access(&mut component_access))?;
 
         // Use a temporary empty FilteredAccess for filters. This prevents them from conflicting with the
         // main Query's `fetch_state` access. Filters are allowed to conflict with the main query fetch
@@ -607,8 +606,7 @@ impl DynamicQuery {
         let mut filter_component_access = FilteredAccess::default();
         filters
             .iter()
-            .map(|filter| filter.update_component_access(&mut filter_component_access))
-            .collect::<Result<_, _>>()?;
+            .try_for_each(|filter| filter.update_component_access(&mut filter_component_access))?;
 
         // Merge the temporary filter access with the main access. This ensures that filter access is
         // properly considered in a global "cross-query" context (both within systems and across systems).
