@@ -1,5 +1,8 @@
-//! Types for referencing ecs values (like components and resources) in a way
-//! that doesn't deal with raw pointers and doesn't have any lifetime issues.
+//! Types for referencing ecs values (like components and resources) in a way that doesn't deal with raw pointers.
+
+use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use bevy_ecs::component::ComponentId;
 use bevy_ecs::prelude::*;
@@ -7,66 +10,16 @@ use bevy_ecs::ptr::Ptr;
 use bevy_ecs::{change_detection::MutUntyped, world::WorldId};
 use bevy_reflect::{GetPath, Reflect, ReflectFromPtr, TypeRegistryArc};
 
-#[derive(Debug, Clone, Copy)]
-pub enum WorldValueBase {
-    Component(Entity, ComponentId),
-    Resource(ComponentId),
-}
+pub mod query;
 
-#[allow(clippy::needless_lifetimes)] // i'd rather be explicit around world references
-impl WorldValueBase {
-    pub fn access<'w>(self, world: &'w World) -> Option<Ptr<'w>> {
-        match self {
-            WorldValueBase::Component(entity, component_id) => {
-                world.get_by_id(entity, component_id)
-            }
-            WorldValueBase::Resource(component_id) => world.get_resource_by_id(component_id),
-        }
-    }
-
-    pub fn access_mut<'w>(self, world: &'w mut World) -> Option<MutUntyped<'w>> {
-        match self {
-            WorldValueBase::Component(entity, component_id) => {
-                world.get_mut_by_id(entity, component_id)
-            }
-            WorldValueBase::Resource(component_id) => world.get_resource_mut_by_id(component_id),
-        }
-    }
-
-    pub fn component_id(self) -> ComponentId {
-        match self {
-            WorldValueBase::Component(_, id) => id,
-            WorldValueBase::Resource(id) => id,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ReflectValueRef {
-    base: WorldValueBase,
-    world_id: WorldId,
-    // must be for the type referenced by the `WorldBase` component id
-    reflect_from_ptr: ReflectFromPtr,
-    path: String,
-}
-
-impl std::fmt::Debug for ReflectValueRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReflectValueRef")
-            .field("world_id", &self.world_id)
-            .field("base", &self.base)
-            .field("path", &self.path)
-            .finish()
-    }
-}
-
+/// Error type enum for errors dealing with [`ReflectValueRef`]s
 #[derive(Debug)]
 pub enum ReflectValueRefError {
     InexistentComponent(ComponentId),
     TypeRegistryNotInWorld,
     NoTypeId(ComponentId),
     NoReflectFromPtr(ComponentId),
-    InvalidBaseValue(WorldValueBase),
+    InvalidBaseValue(EcsBase),
     InvalidPath { error_message: String, path: String },
 }
 
@@ -88,13 +41,13 @@ impl std::fmt::Display for ReflectValueRefError {
                 f,
                 "Component {id:?} has no registered `ReflectFromPtr` type data"
             ),
-            ReflectValueRefError::InvalidBaseValue(WorldValueBase::Component(entity, id)) => {
+            ReflectValueRefError::InvalidBaseValue(EcsBase::Component(entity, id)) => {
                 write!(
                     f,
                     "The world has no component {id:?} at the entity {entity:?}"
                 )
             }
-            ReflectValueRefError::InvalidBaseValue(WorldValueBase::Resource(id)) => {
+            ReflectValueRefError::InvalidBaseValue(EcsBase::Resource(id)) => {
                 write!(f, "The world has no resource {id:?}")
             }
             ReflectValueRefError::InvalidPath {
@@ -107,6 +60,54 @@ impl std::fmt::Display for ReflectValueRefError {
     }
 }
 
+/// Either a `(Entity, ComponentId`) pair or a Resource-`ComponentId`
+#[derive(Debug, Clone, Copy)]
+pub enum EcsBase {
+    Component(Entity, ComponentId),
+    Resource(ComponentId),
+}
+
+impl EcsBase {
+    pub fn access(self, world: &World) -> Option<Ptr<'_>> {
+        match self {
+            EcsBase::Component(entity, component_id) => world.get_by_id(entity, component_id),
+            EcsBase::Resource(component_id) => world.get_resource_by_id(component_id),
+        }
+    }
+
+    pub fn access_mut(self, world: &mut World) -> Option<MutUntyped<'_>> {
+        match self {
+            EcsBase::Component(entity, component_id) => world.get_mut_by_id(entity, component_id),
+            EcsBase::Resource(component_id) => world.get_resource_mut_by_id(component_id),
+        }
+    }
+
+    pub fn component_id(self) -> ComponentId {
+        match self {
+            EcsBase::Component(_, id) => id,
+            EcsBase::Resource(id) => id,
+        }
+    }
+}
+
+/// [`EcsBase`] together with the necessary data for safely accessing its value as [`Reflect`]
+#[derive(Clone)]
+pub struct EcsValueRef {
+    base: EcsBase,
+    world_id: WorldId,
+    // must be for the type referenced by the `WorldBase` component id
+    reflect_from_ptr: ReflectFromPtr,
+}
+
+impl std::fmt::Debug for EcsValueRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReflectValueRef")
+            .field("world_id", &self.world_id)
+            .field("base", &self.base)
+            .finish()
+    }
+}
+
 fn get_reflect_from_ptr(
     world: &World,
     component_id: ComponentId,
@@ -114,10 +115,10 @@ fn get_reflect_from_ptr(
     let info = world
         .components()
         .get_info(component_id)
-        .ok_or_else(|| ReflectValueRefError::InexistentComponent(component_id))?;
+        .ok_or(ReflectValueRefError::InexistentComponent(component_id))?;
     let type_id = info
         .type_id()
-        .ok_or_else(|| ReflectValueRefError::NoTypeId(component_id))?;
+        .ok_or(ReflectValueRefError::NoTypeId(component_id))?;
 
     let type_registry = world
         .get_resource::<TypeRegistryArc>()
@@ -125,31 +126,26 @@ fn get_reflect_from_ptr(
     let reflect_from_ptr = type_registry
         .read()
         .get_type_data::<ReflectFromPtr>(type_id)
-        .ok_or_else(|| ReflectValueRefError::NoReflectFromPtr(component_id))?
+        .ok_or(ReflectValueRefError::NoReflectFromPtr(component_id))?
         .clone();
     assert_eq!(reflect_from_ptr.type_id(), type_id);
 
     Ok(reflect_from_ptr)
 }
 
-impl ReflectValueRef {
-    pub fn base(&self) -> WorldValueBase {
-        self.base
-    }
-
+impl EcsValueRef {
     pub fn component(
         world: &World,
         entity: Entity,
         component_id: ComponentId,
-    ) -> Result<ReflectValueRef, ReflectValueRefError> {
+    ) -> Result<EcsValueRef, ReflectValueRefError> {
         let reflect_from_ptr = get_reflect_from_ptr(world, component_id)?;
-        let base = WorldValueBase::Component(entity, component_id);
+        let base = EcsBase::Component(entity, component_id);
 
-        Ok(ReflectValueRef {
+        Ok(EcsValueRef {
             base,
             world_id: world.id(),
             reflect_from_ptr,
-            path: String::new(),
         })
     }
 
@@ -161,27 +157,25 @@ impl ReflectValueRef {
         component_id: ComponentId,
         reflect_from_ptr: ReflectFromPtr,
         world_id: WorldId,
-    ) -> ReflectValueRef {
-        ReflectValueRef {
-            base: WorldValueBase::Component(entity, component_id),
+    ) -> EcsValueRef {
+        EcsValueRef {
+            base: EcsBase::Component(entity, component_id),
             world_id,
             reflect_from_ptr,
-            path: String::new(),
         }
     }
 
     pub fn resource(
         world: &World,
         component_id: ComponentId,
-    ) -> Result<ReflectValueRef, ReflectValueRefError> {
+    ) -> Result<EcsValueRef, ReflectValueRefError> {
         let reflect_from_ptr = get_reflect_from_ptr(world, component_id)?;
-        let base = WorldValueBase::Resource(component_id);
+        let base = EcsBase::Resource(component_id);
 
-        Ok(ReflectValueRef {
+        Ok(EcsValueRef {
             base,
             world_id: world.id(),
             reflect_from_ptr,
-            path: String::new(),
         })
     }
 
@@ -192,12 +186,11 @@ impl ReflectValueRef {
         component_id: ComponentId,
         reflect_from_ptr: ReflectFromPtr,
         world_id: WorldId,
-    ) -> ReflectValueRef {
-        ReflectValueRef {
-            base: WorldValueBase::Resource(component_id),
+    ) -> EcsValueRef {
+        EcsValueRef {
+            base: EcsBase::Resource(component_id),
             world_id,
             reflect_from_ptr,
-            path: String::new(),
         }
     }
 
@@ -211,19 +204,12 @@ impl ReflectValueRef {
         let ptr = self
             .base
             .access(world)
-            .ok_or_else(|| ReflectValueRefError::InvalidBaseValue(self.base))?;
+            .ok_or(ReflectValueRefError::InvalidBaseValue(self.base))?;
         // SAFETY:
         // `val` is a pointer to value of the type that the `ReflectFromPtr` was constructed for,
         // because the mapping from `ComponentId -> TypeId` is immutable and `ReflectFromPtr` is checked to be
         // for the type of the `WorldBase`'s type id.
         let reflect = unsafe { self.reflect_from_ptr.as_reflect_ptr(ptr) };
-
-        let reflect = reflect
-            .path(&self.path)
-            .map_err(|e| ReflectValueRefError::InvalidPath {
-                error_message: e.to_string(),
-                path: self.path.clone(),
-            })?;
 
         Ok(reflect)
     }
@@ -247,7 +233,7 @@ impl ReflectValueRef {
         let mut ptr = self
             .base
             .access_mut(world)
-            .ok_or_else(|| ReflectValueRefError::InvalidBaseValue(self.base))?;
+            .ok_or(ReflectValueRefError::InvalidBaseValue(self.base))?;
 
         // TODO: don't mark as changed on every access
         ptr.set_changed();
@@ -258,173 +244,185 @@ impl ReflectValueRef {
         // for the type of the `WorldBase`'s type id.
         let reflect = unsafe { self.reflect_from_ptr.as_reflect_ptr_mut(ptr.into_inner()) };
 
-        let reflect =
-            reflect
-                .path_mut(&self.path)
-                .map_err(|e| ReflectValueRefError::InvalidPath {
-                    error_message: e.to_string(),
-                    path: self.path.clone(),
-                })?;
-
         Ok(reflect)
     }
+}
 
+/// A [`ReflectValueRef`] without the path offset
+#[derive(Clone, Debug)]
+pub enum ReflectValueRefBase {
+    EccRef(EcsValueRef),
+    Free(Rc<RefCell<dyn Reflect>>),
+}
+
+/// Either a [`EcsValueRef`] or a freestanding [`Reflect`] value, together with a reflect-path offset
+#[derive(Clone, Debug)]
+pub struct ReflectValueRef {
+    base: ReflectValueRefBase,
+    path: String,
+}
+impl From<EcsValueRef> for ReflectValueRef {
+    fn from(value: EcsValueRef) -> Self {
+        ReflectValueRef {
+            base: ReflectValueRefBase::EccRef(value),
+            path: String::new(),
+        }
+    }
+}
+
+enum MaybeRef<'a, T: ?Sized> {
+    Direct(&'a T),
+    Ref(std::cell::Ref<'a, T>),
+}
+
+/// Wraps a borrowed reference to a value in a [`ReflectValueRef`]
+pub struct ReflectValueRefBorrow<'a> {
+    r: MaybeRef<'a, dyn Reflect>,
+    path: &'a str,
+}
+impl std::fmt::Debug for ReflectValueRefBorrow<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let base = match self.r {
+            MaybeRef::Direct(r) => r,
+            MaybeRef::Ref(ref r) => r.deref(),
+        };
+        base.fmt(f)
+    }
+}
+
+impl<'a> Deref for ReflectValueRefBorrow<'a> {
+    type Target = dyn Reflect;
+    fn deref(&self) -> &Self::Target {
+        let base = match self.r {
+            MaybeRef::Direct(r) => r,
+            MaybeRef::Ref(ref r) => r.deref(),
+        };
+        let value = base
+            .path(self.path)
+            .expect("paths are checked in `append_path`");
+        value
+    }
+}
+
+enum MaybeRefMut<'a, T: ?Sized> {
+    Direct(&'a mut T),
+    Ref(std::cell::RefMut<'a, T>),
+}
+
+/// Wraps a borrowed mutable reference to a value in a [`ReflectValueRef`]
+pub struct ReflectValueRefBorrowMut<'a> {
+    r: MaybeRefMut<'a, dyn Reflect>,
+    path: &'a str,
+}
+impl std::fmt::Debug for ReflectValueRefBorrowMut<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let base = match &self.r {
+            MaybeRefMut::Direct(r) => &**r,
+            MaybeRefMut::Ref(ref r) => r.deref(),
+        };
+        base.fmt(f)
+    }
+}
+
+impl<'a> Deref for ReflectValueRefBorrowMut<'a> {
+    type Target = dyn Reflect;
+
+    fn deref(&self) -> &Self::Target {
+        let base = match self.r {
+            MaybeRefMut::Direct(ref r) => &**r,
+            MaybeRefMut::Ref(ref r) => r.deref(),
+        };
+        let value = base
+            .path(self.path)
+            .expect("paths are checked in `append_path`");
+        value
+    }
+}
+impl<'a> DerefMut for ReflectValueRefBorrowMut<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let base = match &mut self.r {
+            MaybeRefMut::Direct(r) => &mut **r,
+            MaybeRefMut::Ref(r) => r.deref_mut(),
+        };
+        let value = base
+            .path_mut(self.path)
+            .expect("paths are checked in `append_path`");
+        value
+    }
+}
+
+impl ReflectValueRef {
+    pub fn free(value: Rc<RefCell<dyn Reflect>>) -> Self {
+        ReflectValueRef {
+            base: ReflectValueRefBase::Free(value),
+            path: String::new(),
+        }
+    }
+
+    pub fn ecs_ref(value: EcsValueRef) -> Self {
+        ReflectValueRef {
+            base: ReflectValueRefBase::EccRef(value),
+            path: String::new(),
+        }
+    }
     /// Appends a new path to the reflect path offset of the [`ReflectValueRef`]
     /// ```rust,no_run
     /// # let value: bevy_ecs_dynamic::reflect_value_ref::ReflectValueRef = unimplemented!();
-    /// value.append_path(".foo");
-    /// value.append_path("[3]");
+    /// # let world: bevy_ecs::prelude::World = unimplemented!();
+    /// value.append_path(".foo", &world);
+    /// value.append_path("[3]", &world);
     /// ```
     /// This method will *not* check the validity of the path, and further calls to [`get`](Self::get) or [`get_mut`](Self::get_mut) may fail afterwards.
-    pub fn append_path(&self, path: &str) -> Self {
-        ReflectValueRef {
-            base: self.base,
-            world_id: self.world_id,
-            reflect_from_ptr: self.reflect_from_ptr.clone(), // the base type doesn't change
+    // TODO make this check the path, either by taking the world or accessing static info
+    pub fn append_path(&self, path: &str, world: &World) -> Result<Self, ReflectValueRefError> {
+        let new = ReflectValueRef {
+            base: self.base.clone(),
             path: format!("{}{}", self.path, path),
-        }
-    }
-}
-
-use crate::dynamic_query::{DynamicQuery, DynamicQueryIter, FilterKind};
-
-pub struct ReflectValueRefQuery {
-    query: DynamicQuery,
-}
-
-impl ReflectValueRefQuery {
-    pub fn new(world: &World, components: &[ComponentId]) -> Self {
-        Self {
-            query: DynamicQuery::new(
-                world,
-                vec![],
-                components.iter().map(|&id| FilterKind::With(id)).collect(),
-            )
-            .expect("dynamic query construction cannot fail because only filters are supplied"),
-        }
+        };
+        new.get(world)?;
+        Ok(new)
     }
 
-    pub fn iter<'w, 's>(&'s mut self, world: &'w World) -> ReflectValueRefQueryIter<'w, 's> {
-        let components: Vec<_> = self
-            .query
-            .filters()
-            .iter()
-            .map(|filter| match *filter {
-                FilterKind::With(id) => id,
-                _ => unreachable!(),
-            })
-            .map(|component_id| {
-                // TODO no unwrap
-                let reflect_from_ptr = get_reflect_from_ptr(world, component_id).unwrap();
-                (component_id, reflect_from_ptr)
-            })
-            .collect();
-
-        ReflectValueRefQueryIter {
-            world_id: world.id(),
-            components,
-            iter: self.query.iter(world),
-        }
-    }
-}
-
-pub struct ReflectValueRefQueryIter<'w, 's> {
-    world_id: WorldId,
-    iter: DynamicQueryIter<'w, 's>,
-    components: Vec<(ComponentId, ReflectFromPtr)>,
-}
-
-pub struct ReflectValueRefQueryItem {
-    pub entity: Entity,
-    pub items: Vec<ReflectValueRef>,
-}
-
-impl<'w, 's> Iterator for ReflectValueRefQueryIter<'w, 's> {
-    type Item = ReflectValueRefQueryItem;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let item = self.iter.next()?;
-
-        let items: Vec<_> = self
-            .components
-            .iter()
-            .map(|(component_id, reflect_from_ptr)| unsafe {
-                ReflectValueRef::component_unchecked(
-                    item.entity,
-                    *component_id,
-                    reflect_from_ptr.clone(),
-                    self.world_id,
-                )
-            })
-            .collect();
-
-        Some(ReflectValueRefQueryItem {
-            entity: item.entity,
-            items,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use bevy_ecs::prelude::*;
-    use bevy_reflect::{Reflect, TypeRegistryArc};
-
-    use super::ReflectValueRefQuery;
-
-    #[derive(Component, Reflect)]
-
-    struct TestComponent1 {
-        value: String,
-    }
-
-    #[derive(Component, Reflect)]
-
-    struct TestComponent2 {
-        field: u8,
-    }
-
-    #[test]
-    fn iter() {
-        let mut world = World::new();
-
-        let component_id_1 = world.init_component::<TestComponent1>();
-        let component_id_2 = world.init_component::<TestComponent2>();
-
-        let type_registry = world.get_resource_or_insert_with(TypeRegistryArc::default);
-        {
-            let mut type_registry = type_registry.write();
-            type_registry.register::<TestComponent1>();
-            type_registry.register::<TestComponent2>();
-        }
-
-        world.spawn().insert(TestComponent1 { value: "no".into() });
-        world.spawn().insert_bundle((
-            TestComponent1 {
-                value: "yes".into(),
-            },
-            TestComponent2 { field: 5 },
-        ));
-
-        let mut query = ReflectValueRefQuery::new(&world, &[component_id_1, component_id_2]);
-        let results: Vec<_> = query.iter(&world).collect();
-        assert_eq!(results.len(), 1);
-
-        match results[0].items.as_slice() {
-            [a, b] => {
-                assert_eq!(a.component_id(), component_id_1);
-                assert_eq!(b.component_id(), component_id_2);
-
-                assert_eq!(
-                    a.append_path(".value")
-                        .get(&world)
-                        .unwrap()
-                        .downcast_ref::<String>()
-                        .unwrap(),
-                    "yes"
-                )
+    pub fn get<'s, 'w: 's>(
+        &'s self,
+        world: &'w World,
+    ) -> Result<ReflectValueRefBorrow<'s>, ReflectValueRefError> {
+        match &self.base {
+            ReflectValueRefBase::EccRef(value) => {
+                let value = value.get(world)?;
+                Ok(ReflectValueRefBorrow {
+                    r: MaybeRef::Direct(value),
+                    path: &self.path,
+                })
             }
-            _ => unreachable!(),
+            ReflectValueRefBase::Free(value) => {
+                let value = value.borrow();
+                Ok(ReflectValueRefBorrow {
+                    r: MaybeRef::Ref(value),
+                    path: &self.path,
+                })
+            }
+        }
+    }
+    pub fn get_mut<'s, 'w: 's>(
+        &'s mut self,
+        world: &'w mut World,
+    ) -> Result<ReflectValueRefBorrowMut<'s>, ReflectValueRefError> {
+        match &self.base {
+            ReflectValueRefBase::EccRef(value) => {
+                let value = value.get_mut(world)?;
+                Ok(ReflectValueRefBorrowMut {
+                    r: MaybeRefMut::Direct(value),
+                    path: &self.path,
+                })
+            }
+            ReflectValueRefBase::Free(value) => {
+                let value = value.borrow_mut();
+                Ok(ReflectValueRefBorrowMut {
+                    r: MaybeRefMut::Ref(value),
+                    path: &self.path,
+                })
+            }
         }
     }
 }
