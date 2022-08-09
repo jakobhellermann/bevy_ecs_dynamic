@@ -67,7 +67,7 @@ pub enum ReflectValueRefError {
     NoTypeId(ComponentId),
     NoReflectFromPtr(ComponentId),
     InvalidBaseValue(WorldValueBase),
-    InvalidPath(String),
+    InvalidPath { error_message: String, path: String },
 }
 
 impl std::error::Error for ReflectValueRefError {}
@@ -97,7 +97,12 @@ impl std::fmt::Display for ReflectValueRefError {
             ReflectValueRefError::InvalidBaseValue(WorldValueBase::Resource(id)) => {
                 write!(f, "The world has no resource {id:?}")
             }
-            ReflectValueRefError::InvalidPath(msg) => write!(f, "invalid path: {msg}"),
+            ReflectValueRefError::InvalidPath {
+                error_message: msg,
+                path,
+            } => {
+                write!(f, "invalid path: {msg} (\"{path}\")")
+            }
         }
     }
 }
@@ -211,7 +216,10 @@ impl ReflectValueRef {
 
         let reflect = reflect
             .path(&self.path)
-            .map_err(|e| ReflectValueRefError::InvalidPath(e.to_string()))?;
+            .map_err(|e| ReflectValueRefError::InvalidPath {
+                error_message: e.to_string(),
+                path: self.path.clone(),
+            })?;
 
         Ok(reflect)
     }
@@ -236,9 +244,13 @@ impl ReflectValueRef {
         // for the type of the `WorldBase`'s type id.
         let reflect = unsafe { self.reflect_from_ptr.as_reflect_ptr_mut(ptr.into_inner()) };
 
-        let reflect = reflect
-            .path_mut(&self.path)
-            .map_err(|e| ReflectValueRefError::InvalidPath(e.to_string()))?;
+        let reflect =
+            reflect
+                .path_mut(&self.path)
+                .map_err(|e| ReflectValueRefError::InvalidPath {
+                    error_message: e.to_string(),
+                    path: self.path.clone(),
+                })?;
 
         Ok(reflect)
     }
