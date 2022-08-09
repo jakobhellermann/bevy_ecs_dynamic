@@ -41,6 +41,7 @@ impl WorldValueBase {
     }
 }
 
+#[derive(Clone)]
 pub struct ReflectValueRef {
     base: WorldValueBase,
     world_id: WorldId,
