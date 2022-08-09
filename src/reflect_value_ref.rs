@@ -379,7 +379,21 @@ impl ReflectValueRef {
             base: self.base.clone(),
             path: format!("{}{}", self.path, path),
         };
-        new.get(world)?;
+
+        {
+            // TODO: this can surely be less duplicated
+            let borrow = new.get(world)?;
+            let base = match borrow.r {
+                MaybeRef::Direct(r) => r,
+                MaybeRef::Ref(ref r) => r.deref(),
+            };
+            base.path(&new.path)
+                .map_err(|e| ReflectValueRefError::InvalidPath {
+                    error_message: e.to_string(),
+                    path: new.path.clone(),
+                })?;
+        }
+
         Ok(new)
     }
 
