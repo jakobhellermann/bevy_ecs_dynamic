@@ -133,6 +133,10 @@ fn get_reflect_from_ptr(
 }
 
 impl ReflectValueRef {
+    pub fn base(&self) -> WorldValueBase {
+        self.base
+    }
+
     pub fn component(
         world: &World,
         entity: Entity,
@@ -223,8 +227,18 @@ impl ReflectValueRef {
 
         Ok(reflect)
     }
-
     pub fn get_mut<'w>(
+        &self,
+        world: &'w mut World,
+    ) -> Result<&'w mut dyn Reflect, ReflectValueRefError> {
+        // SAFETY: unique world access
+        unsafe { self.get_mut_unchecked(world) }
+    }
+
+    /// # Safety
+    /// This will allow aliased mutable access to the value. The caller must ensure
+    /// that there is either only one mutable access or multiple immutable accesses at a time.
+    pub unsafe fn get_mut_unchecked<'w>(
         &self,
         world: &'w mut World,
     ) -> Result<&'w mut dyn Reflect, ReflectValueRefError> {
