@@ -252,7 +252,7 @@ impl EcsValueRef {
 #[derive(Clone, Debug)]
 pub enum ReflectValueRefBase {
     EccRef(EcsValueRef),
-    Free(Rc<RefCell<dyn Reflect>>),
+    Free(Rc<RefCell<Box<dyn Reflect>>>),
 }
 
 /// Either a [`EcsValueRef`] or a freestanding [`Reflect`] value, together with a reflect-path offset
@@ -272,7 +272,7 @@ impl From<EcsValueRef> for ReflectValueRef {
 
 enum MaybeRef<'a, T: ?Sized> {
     Direct(&'a T),
-    Ref(std::cell::Ref<'a, T>),
+    Ref(std::cell::Ref<'a, Box<T>>),
 }
 
 /// Wraps a borrowed reference to a value in a [`ReflectValueRef`]
@@ -284,7 +284,7 @@ impl std::fmt::Debug for ReflectValueRefBorrow<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let base = match self.r {
             MaybeRef::Direct(r) => r,
-            MaybeRef::Ref(ref r) => r.deref(),
+            MaybeRef::Ref(ref r) => &***r,
         };
         base.fmt(f)
     }
@@ -295,7 +295,7 @@ impl<'a> Deref for ReflectValueRefBorrow<'a> {
     fn deref(&self) -> &Self::Target {
         let base = match self.r {
             MaybeRef::Direct(r) => r,
-            MaybeRef::Ref(ref r) => r.deref(),
+            MaybeRef::Ref(ref r) => &***r,
         };
         let value = base
             .path(self.path)
@@ -306,7 +306,7 @@ impl<'a> Deref for ReflectValueRefBorrow<'a> {
 
 enum MaybeRefMut<'a, T: ?Sized> {
     Direct(&'a mut T),
-    Ref(std::cell::RefMut<'a, T>),
+    Ref(std::cell::RefMut<'a, Box<T>>),
 }
 
 /// Wraps a borrowed mutable reference to a value in a [`ReflectValueRef`]
@@ -318,7 +318,7 @@ impl std::fmt::Debug for ReflectValueRefBorrowMut<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let base = match &self.r {
             MaybeRefMut::Direct(r) => &**r,
-            MaybeRefMut::Ref(ref r) => r.deref(),
+            MaybeRefMut::Ref(ref r) => &***r,
         };
         base.fmt(f)
     }
@@ -330,7 +330,7 @@ impl<'a> Deref for ReflectValueRefBorrowMut<'a> {
     fn deref(&self) -> &Self::Target {
         let base = match self.r {
             MaybeRefMut::Direct(ref r) => &**r,
-            MaybeRefMut::Ref(ref r) => r.deref(),
+            MaybeRefMut::Ref(ref r) => &***r,
         };
         let value = base
             .path(self.path)
@@ -342,7 +342,7 @@ impl<'a> DerefMut for ReflectValueRefBorrowMut<'a> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let base = match &mut self.r {
             MaybeRefMut::Direct(r) => &mut **r,
-            MaybeRefMut::Ref(r) => r.deref_mut(),
+            MaybeRefMut::Ref(r) => &mut ***r,
         };
         let value = base
             .path_mut(self.path)
@@ -352,7 +352,7 @@ impl<'a> DerefMut for ReflectValueRefBorrowMut<'a> {
 }
 
 impl ReflectValueRef {
-    pub fn free(value: Rc<RefCell<dyn Reflect>>) -> Self {
+    pub fn free(value: Rc<RefCell<Box<dyn Reflect>>>) -> Self {
         ReflectValueRef {
             base: ReflectValueRefBase::Free(value),
             path: String::new(),
@@ -385,7 +385,7 @@ impl ReflectValueRef {
             let borrow = new.get(world)?;
             let base = match borrow.r {
                 MaybeRef::Direct(r) => r,
-                MaybeRef::Ref(ref r) => r.deref(),
+                MaybeRef::Ref(ref r) => &***r,
             };
             base.path(&new.path)
                 .map_err(|e| ReflectValueRefError::InvalidPath {
