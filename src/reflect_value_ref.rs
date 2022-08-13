@@ -286,7 +286,10 @@ impl std::fmt::Debug for ReflectValueRefBorrow<'_> {
             MaybeRef::Direct(r) => r,
             MaybeRef::Ref(ref r) => &***r,
         };
-        base.fmt(f)
+        let value = base
+            .path(self.path)
+            .expect("paths are checked in `append_path`");
+        value.fmt(f)
     }
 }
 
