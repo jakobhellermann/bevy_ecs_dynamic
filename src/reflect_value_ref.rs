@@ -4,11 +4,12 @@ use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
+use bevy_app::AppTypeRegistry;
 use bevy_ecs::component::ComponentId;
 use bevy_ecs::prelude::*;
 use bevy_ecs::ptr::Ptr;
 use bevy_ecs::{change_detection::MutUntyped, world::WorldId};
-use bevy_reflect::{GetPath, Reflect, ReflectFromPtr, TypeRegistryArc};
+use bevy_reflect::{GetPath, Reflect, ReflectFromPtr};
 
 pub mod query;
 
@@ -122,7 +123,7 @@ fn get_reflect_from_ptr(
         .ok_or(ReflectValueRefError::NoTypeId(component_id))?;
 
     let type_registry = world
-        .get_resource::<TypeRegistryArc>()
+        .get_resource::<AppTypeRegistry>()
         .ok_or(ReflectValueRefError::TypeRegistryNotInWorld)?;
     let reflect_from_ptr = type_registry
         .read()
