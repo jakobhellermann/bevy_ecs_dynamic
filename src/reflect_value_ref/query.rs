@@ -1,4 +1,4 @@
-use bevy_ecs::{component::ComponentId, prelude::*, world::WorldId};
+use bevy_ecs::{component::ComponentId, prelude::*, query::QueryEntityError, world::WorldId};
 use bevy_reflect::ReflectFromPtr;
 
 use crate::dynamic_query::{DynamicQuery, DynamicQueryIter, FilterKind};
@@ -22,9 +22,44 @@ impl EcsValueRefQuery {
         }
     }
 
+    pub fn get<'w, 's>(
+        &'s mut self,
+        world: &'w World,
+        entity: Entity,
+    ) -> Result<Vec<EcsValueRef>, QueryEntityError> {
+        let components = self.components(world);
+        self.query.get(world, entity)?;
+
+        let results = components
+            .iter()
+            .map(|(component_id, reflect_from_ptr)| {
+                // SAFETY: component_id matches the reflect_from_ptr
+                unsafe {
+                    EcsValueRef::component_unchecked(
+                        entity,
+                        *component_id,
+                        reflect_from_ptr.clone(),
+                        world.id(),
+                    )
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     pub fn iter<'w, 's>(&'s mut self, world: &'w World) -> EcsValueRefQueryIter<'w, 's> {
-        let components: Vec<_> = self
-            .query
+        let components = self.components(world);
+
+        EcsValueRefQueryIter {
+            world_id: world.id(),
+            components,
+            iter: self.query.iter(world),
+        }
+    }
+
+    fn components<'s>(&'s mut self, world: &World) -> Vec<(ComponentId, ReflectFromPtr)> {
+        self.query
             .filters()
             .iter()
             .map(|filter| match *filter {
@@ -36,13 +71,7 @@ impl EcsValueRefQuery {
                 let reflect_from_ptr = get_reflect_from_ptr(world, component_id).unwrap();
                 (component_id, reflect_from_ptr)
             })
-            .collect();
-
-        EcsValueRefQueryIter {
-            world_id: world.id(),
-            components,
-            iter: self.query.iter(world),
-        }
+            .collect()
     }
 }
 

@@ -108,6 +108,7 @@ impl std::fmt::Debug for EcsValueRef {
     }
 }
 
+// guarantees that `ComponentId` matches `ReflectFromPtr`
 fn get_reflect_from_ptr(
     world: &World,
     component_id: ComponentId,
