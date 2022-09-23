@@ -6,7 +6,7 @@ use bevy_ecs::archetype::{
 use bevy_ecs::component::{ComponentId, ComponentTicks, StorageType};
 use bevy_ecs::prelude::*;
 use bevy_ecs::ptr::{Ptr, PtrMut, ThinSlicePtr, UnsafeCellDeref};
-use bevy_ecs::query::{Access, FilteredAccess};
+use bevy_ecs::query::{Access, FilteredAccess, QueryEntityError};
 use bevy_ecs::storage::{ComponentSparseSet, Table, TableId, Tables};
 use bevy_ecs::world::WorldId;
 use fixedbitset::FixedBitSet;
@@ -636,6 +636,10 @@ impl DynamicQuery {
         &self.filters
     }
 
+    fn is_readonly(&self) -> bool {
+        self.fetches().iter().all(|fetch| fetch.is_readonly())
+    }
+
     fn validate_world(&self, world: &World) {
         assert!(
             world.id() == self.world_id,
@@ -727,6 +731,92 @@ impl DynamicQuery {
         change_tick: u32,
     ) -> DynamicQueryIter<'w, 's> {
         DynamicQueryIter::new(world, self, last_change_tick, change_tick)
+    }
+
+    pub fn get_mut<'w, 's>(
+        &'s mut self,
+        world: &'w mut World,
+        entity: Entity,
+    ) -> Result<Vec<FetchResult<'w>>, QueryEntityError> {
+        self.update_archetypes(world);
+
+        // SAFETY: query has unique world access
+        unsafe { self.get_unchecked(world, entity) }
+    }
+
+    pub fn get<'w, 's>(
+        &'s mut self,
+        world: &'w World,
+        entity: Entity,
+    ) -> Result<Vec<FetchResult<'w>>, QueryEntityError> {
+        self.update_archetypes(world);
+
+        assert!(self.is_readonly());
+        // SAFETY: query is readonly and borrows from 'w world
+        unsafe { self.get_unchecked(world, entity) }
+    }
+
+    /// # Safety
+    ///
+    /// This does not check for mutable query correctness. To be safe, make sure mutable queries
+    /// have unique access to the components they query.
+    /// This does not validate that `world.id()` matches `self.world_id`. Calling this on a `world`
+    /// with a mismatched [`WorldId`] is unsound.
+    unsafe fn get_unchecked<'w, 's>(
+        &'s mut self,
+        world: &'w World,
+        entity: Entity,
+    ) -> Result<Vec<FetchResult<'w>>, QueryEntityError> {
+        self.update_archetypes(world);
+
+        self.get_unchecked_manual(world, entity)
+    }
+    /// # Safety
+    ///
+    /// This does not check for mutable query correctness. To be safe, make sure mutable queries
+    /// have unique access to the components they query.
+    /// This does not validate that `world.id()` matches `self.world_id`. Calling this on a `world`
+    /// with a mismatched [`WorldId`] is unsound.
+    unsafe fn get_unchecked_manual<'w, 's>(
+        &'s mut self,
+        world: &'w World,
+        entity: Entity,
+    ) -> Result<Vec<FetchResult<'w>>, QueryEntityError> {
+        let last_change_tick = world.last_change_tick();
+        let change_tick = world.read_change_tick();
+
+        let location = world
+            .entities()
+            .get(entity)
+            .ok_or(QueryEntityError::NoSuchEntity(entity))?;
+        if !self
+            .matched_archetypes
+            .contains(location.archetype_id.index())
+        {
+            return Err(QueryEntityError::QueryDoesNotMatch(entity));
+        }
+
+        let archetype = &world.archetypes()[location.archetype_id];
+
+        let mut fetch = unsafe {
+            ComponentFetchStates::init(
+                world,
+                last_change_tick,
+                change_tick,
+                &self.component_fetches,
+            )
+        };
+        let mut filter = unsafe {
+            ComponentFilterStates::init(world, last_change_tick, change_tick, &self.filters)
+        };
+
+        fetch.set_archetype(archetype, &world.storages().tables);
+        filter.set_archetype(archetype, &world.storages().tables);
+        if filter.archetype_filter_fetch(location.index) {
+            Ok(fetch.archetype_fetch(location.index))
+        } else {
+            Err(QueryEntityError::QueryDoesNotMatch(entity))
+        }
     }
 }
 
