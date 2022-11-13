@@ -87,8 +87,9 @@ impl<'w, 's> Iterator for EcsValueRefQueryIter<'w, 's> {
 
 #[cfg(test)]
 mod tests {
+    use bevy_app::AppTypeRegistry;
     use bevy_ecs::prelude::*;
-    use bevy_reflect::{Reflect, TypeRegistryArc};
+    use bevy_reflect::Reflect;
 
     use crate::reflect_value_ref::ReflectValueRef;
 
@@ -113,15 +114,15 @@ mod tests {
         let component_id_1 = world.init_component::<TestComponent1>();
         let component_id_2 = world.init_component::<TestComponent2>();
 
-        let type_registry = world.get_resource_or_insert_with(TypeRegistryArc::default);
+        let type_registry = world.get_resource_or_insert_with(AppTypeRegistry::default);
         {
             let mut type_registry = type_registry.write();
             type_registry.register::<TestComponent1>();
             type_registry.register::<TestComponent2>();
         }
 
-        world.spawn().insert(TestComponent1 { value: "no".into() });
-        world.spawn().insert_bundle((
+        world.spawn(TestComponent1 { value: "no".into() });
+        world.spawn((
             TestComponent1 {
                 value: "yes".into(),
             },

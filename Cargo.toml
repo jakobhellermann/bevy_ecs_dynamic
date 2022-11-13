@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-bevy_ecs = { version = "0.9.0-dev", default-features = false }
-bevy_app = "0.9.0-dev"
-bevy_reflect = "0.9.0-dev"
+bevy_ecs = { version = "0.9.0", default-features = false }
+bevy_app = "0.9.0"
+bevy_reflect = "0.9.0"
 fixedbitset = "0.4.2"
