@@ -21,7 +21,7 @@ pub enum ReflectValueRefError {
     NoTypeId(ComponentId),
     NoReflectFromPtr(ComponentId),
     InvalidBaseValue(EcsBase),
-    InvalidPath { error_message: String, path: String },
+    InvalidPath { error_message: String, path: String, type_name: String },
 }
 
 impl std::error::Error for ReflectValueRefError {}
@@ -54,8 +54,9 @@ impl std::fmt::Display for ReflectValueRefError {
             ReflectValueRefError::InvalidPath {
                 error_message: msg,
                 path,
+                type_name,
             } => {
-                write!(f, "invalid path: {msg} (\"{path}\")")
+                write!(f, "invalid path on {type_name}: {msg} (\"{path}\")")
             }
         }
     }
@@ -394,6 +395,7 @@ impl ReflectValueRef {
             };
             base.path(&new.path)
                 .map_err(|e| ReflectValueRefError::InvalidPath {
+                    type_name: base.type_name().to_string(),
                     error_message: e.to_string(),
                     path: new.path.clone(),
                 })?;
