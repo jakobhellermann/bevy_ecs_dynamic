@@ -3,7 +3,7 @@ use std::cell::UnsafeCell;
 use bevy_ecs::archetype::{
     Archetype, ArchetypeComponentId, ArchetypeEntity, ArchetypeGeneration, ArchetypeId, Archetypes,
 };
-use bevy_ecs::component::{ComponentId, ComponentTicks, StorageType};
+use bevy_ecs::component::{ComponentId, ComponentTicks, StorageType, Tick};
 use bevy_ecs::prelude::*;
 use bevy_ecs::ptr::{Ptr, PtrMut, ThinSlicePtr, UnsafeCellDeref};
 use bevy_ecs::query::{Access, FilteredAccess, QueryEntityError};
@@ -38,9 +38,9 @@ pub enum FetchResult<'w> {
     Ref(Ptr<'w>),
     RefMut {
         value: PtrMut<'w>,
-        ticks: &'w mut ComponentTicks,
+        added: Tick,
+        changed: &'w Tick,
         last_change_tick: u32,
-        change_tick: u32,
     },
 }
 
@@ -179,11 +179,14 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 struct ComponentFetchState<'w> {
-    table_components: Option<Ptr<'w>>,
+    table_data: Option<(
+        Ptr<'w>,
+        ThinSlicePtr<'w, UnsafeCell<Tick>>,
+        ThinSlicePtr<'w, UnsafeCell<Tick>>,
+    )>,
     entity_table_rows: Option<ThinSlicePtr<'w, usize>>,
     sparse_set: Option<&'w ComponentSparseSet>,
 
-    table_ticks: Option<ThinSlicePtr<'w, UnsafeCell<ComponentTicks>>>,
     last_change_tick: u32,
     change_tick: u32,
 
@@ -203,10 +206,9 @@ impl<'w> ComponentFetchState<'w> {
         let component_info = world.components().get_info(component_id).unwrap();
 
         ComponentFetchState {
-            table_components: None,
+            table_data: None,
             entity_table_rows: None,
             sparse_set: None,
-            table_ticks: None,
             last_change_tick,
             change_tick,
             fetch_kind,
@@ -222,8 +224,11 @@ impl<'w> ComponentFetchState<'w> {
                 let column = tables[archetype.table_id()]
                     .get_column(self.fetch_kind.component_id())
                     .unwrap();
-                self.table_components = Some(column.get_data_ptr());
-                self.table_ticks = Some(column.get_ticks_slice().into());
+                self.table_data = Some((
+                    column.get_data_ptr(),
+                    column.get_added_ticks_slice().into(),
+                    column.get_changed_ticks_slice().into(),
+                ));
             }
             StorageType::SparseSet => {}
         }
@@ -232,48 +237,45 @@ impl<'w> ComponentFetchState<'w> {
     #[inline]
     unsafe fn set_table(&mut self, table: &'w Table) {
         let column = table.get_column(self.fetch_kind.component_id()).unwrap();
-        self.table_components = Some(column.get_data_ptr());
-        self.table_ticks = Some(column.get_ticks_slice().into());
+
+        self.table_data = Some((
+            column.get_data_ptr(),
+            column.get_added_ticks_slice().into(),
+            column.get_changed_ticks_slice().into(),
+        ));
     }
 
     #[inline]
     unsafe fn fetch(&mut self, entity: Entity, table_row: usize) -> FetchResult<'w> {
         match self.storage_type {
             StorageType::Table => {
-                let (table_components, table_ticks) =
-                    self.table_components.zip(self.table_ticks).unwrap();
+                let (table_components, added_ticks, changed_ticks) = self.table_data.unwrap();
                 let value = table_components.byte_add(table_row * self.component_size);
-                let component_ticks = table_ticks.get(table_row);
                 match self.fetch_kind {
                     FetchKind::Ref(_) => FetchResult::Ref(value),
                     FetchKind::RefMut(_) => FetchResult::RefMut {
                         value: value.assert_unique(),
-                        ticks: component_ticks.deref_mut(),
+                        added: *added_ticks.get(table_row).deref(),
+                        changed: changed_ticks.get(table_row).deref(),
                         last_change_tick: self.last_change_tick,
-                        change_tick: self.change_tick,
                     },
                 }
             }
             StorageType::SparseSet => match self.storage_type {
                 StorageType::Table => {
-                    let (entity_table_rows, (table_components, table_ticks)) = self
-                        .entity_table_rows
-                        .zip(self.table_components.zip(self.table_ticks))
-                        .unwrap();
+                    let (entity_table_rows, (table_components, added_ticks, changed_ticks)) =
+                        self.entity_table_rows.zip(self.table_data).unwrap();
                     let table_row = *entity_table_rows.get(table_row);
                     let value = table_components.byte_add(table_row * self.component_size);
 
                     match self.fetch_kind {
                         FetchKind::Ref(_) => FetchResult::Ref(value),
-                        FetchKind::RefMut(_) => {
-                            let component_ticks = table_ticks.get(table_row).deref_mut();
-                            FetchResult::RefMut {
-                                value: value.assert_unique(),
-                                ticks: component_ticks,
-                                last_change_tick: self.last_change_tick,
-                                change_tick: self.change_tick,
-                            }
-                        }
+                        FetchKind::RefMut(_) => FetchResult::RefMut {
+                            value: value.assert_unique(),
+                            added: *added_ticks.get(table_row).deref(),
+                            changed: changed_ticks.get(table_row).deref(),
+                            last_change_tick: self.last_change_tick,
+                        },
                     }
                 }
                 StorageType::SparseSet => {
@@ -283,9 +285,9 @@ impl<'w> ComponentFetchState<'w> {
                         FetchKind::Ref(_) => FetchResult::Ref(value),
                         FetchKind::RefMut(_) => FetchResult::RefMut {
                             value: value.assert_unique(),
-                            ticks: component_ticks.deref_mut(),
+                            added: component_ticks.added.read(),
+                            changed: component_ticks.changed.deref(),
                             last_change_tick: self.last_change_tick,
-                            change_tick: self.change_tick,
                         },
                     }
                 }
@@ -353,7 +355,10 @@ impl<'w> ComponentFetchStates<'w> {
 }
 
 struct ComponentFilterChangeDetection<'w> {
-    table_ticks: Option<ThinSlicePtr<'w, UnsafeCell<ComponentTicks>>>,
+    table_ticks: Option<(
+        ThinSlicePtr<'w, UnsafeCell<Tick>>,
+        ThinSlicePtr<'w, UnsafeCell<Tick>>,
+    )>,
     entities: Option<ThinSlicePtr<'w, ArchetypeEntity>>,
     sparse_set: Option<&'w ComponentSparseSet>,
     last_change_tick: u32,
@@ -369,17 +374,13 @@ impl<'w> ComponentFilterChangeDetection<'w> {
     ) -> ComponentTicks {
         match storage_type {
             StorageType::Table => {
-                let ticks = *self.table_ticks.unwrap().get(table_row).deref();
-                ticks
+                let (added_ticks, changed_ticks) = self.table_ticks.unwrap();
+                let added = added_ticks.get(table_row).read();
+                let changed = changed_ticks.get(table_row).read();
+                (added, changed)
             }
             StorageType::SparseSet => {
-                let ticks = self
-                    .sparse_set
-                    .unwrap()
-                    .get_ticks(entity)
-                    .map(|ticks| &*ticks.get())
-                    .cloned()
-                    .unwrap();
+                let ticks = self.sparse_set.unwrap().get_ticks(entity).unwrap();
                 ticks
             }
         }
@@ -423,13 +424,11 @@ impl<'w> ComponentFilterState<'w> {
             FilterKind::Changed(_) | FilterKind::Added(_) => match self.storage_type {
                 StorageType::Table => {
                     let table = &tables[archetype.table_id()];
-                    self.change_detection.table_ticks = Some(
-                        table
-                            .get_column(self.component_id)
-                            .unwrap()
-                            .get_ticks_slice()
-                            .into(),
-                    );
+                    let column = &table.get_column(self.component_id).unwrap();
+                    self.change_detection.table_ticks = Some((
+                        column.get_added_ticks_slice().into(),
+                        column.get_changed_ticks_slice().into(),
+                    ));
                 }
                 StorageType::SparseSet => {
                     self.change_detection.entities = Some(archetype.entities().into())
@@ -443,13 +442,11 @@ impl<'w> ComponentFilterState<'w> {
         match self.kind {
             FilterKind::With(_) | FilterKind::Without(_) => {}
             FilterKind::Changed(_) | FilterKind::Added(_) => {
-                self.change_detection.table_ticks = Some(
-                    table
-                        .get_column(self.component_id)
-                        .unwrap()
-                        .get_ticks_slice()
-                        .into(),
-                );
+                let column = &table.get_column(self.component_id).unwrap();
+                self.change_detection.table_ticks = Some((
+                    column.get_added_ticks_slice().into(),
+                    column.get_changed_ticks_slice().into(),
+                ));
             }
         }
     }
@@ -785,8 +782,8 @@ impl DynamicQuery {
         fetch.set_archetype(archetype, &world.storages().tables);
         filter.set_archetype(archetype, &world.storages().tables);
 
-        if filter.fetch(entity, location.index) {
-            Ok(fetch.fetch(entity, location.index))
+        if filter.fetch(entity, location.table_row.index()) {
+            Ok(fetch.fetch(entity, location.table_row.index()))
         } else {
             Err(QueryEntityError::QueryDoesNotMatch(entity))
         }
@@ -898,18 +895,19 @@ impl<'w, 's> Iterator for DynamicQueryIter<'w, 's> {
                     // `current_index` is an archetype index row in range of the current archetype, because if it was not, then the if above would have been executed.
                     let archetype_entity =
                         self.archetype_entities.get_unchecked(self.current_index);
-                    if !self
-                        .filter
-                        .fetch(archetype_entity.entity(), archetype_entity.table_row())
-                    {
+                    if !self.filter.fetch(
+                        archetype_entity.entity(),
+                        archetype_entity.table_row().index(),
+                    ) {
                         self.current_index += 1;
                         continue;
                     }
 
                     let entity = self.fetch.entity(self.current_index);
-                    let items = self
-                        .fetch
-                        .fetch(archetype_entity.entity(), archetype_entity.table_row());
+                    let items = self.fetch.fetch(
+                        archetype_entity.entity(),
+                        archetype_entity.table_row().index(),
+                    );
 
                     self.current_index += 1;
 

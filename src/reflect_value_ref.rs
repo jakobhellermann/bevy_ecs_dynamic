@@ -21,7 +21,11 @@ pub enum ReflectValueRefError {
     NoTypeId(ComponentId),
     NoReflectFromPtr(ComponentId),
     InvalidBaseValue(EcsBase),
-    InvalidPath { error_message: String, path: String, type_name: String },
+    InvalidPath {
+        error_message: String,
+        path: String,
+        type_name: String,
+    },
 }
 
 impl std::error::Error for ReflectValueRefError {}
@@ -290,7 +294,7 @@ impl std::fmt::Debug for ReflectValueRefBorrow<'_> {
             MaybeRef::Ref(ref r) => &***r,
         };
         let value = base
-            .path(self.path)
+            .reflect_path(self.path)
             .expect("paths are checked in `append_path`");
         value.fmt(f)
     }
@@ -304,7 +308,7 @@ impl<'a> Deref for ReflectValueRefBorrow<'a> {
             MaybeRef::Ref(ref r) => &***r,
         };
         let value = base
-            .path(self.path)
+            .reflect_path(self.path)
             .expect("paths are checked in `append_path`");
         value
     }
@@ -339,7 +343,7 @@ impl<'a> Deref for ReflectValueRefBorrowMut<'a> {
             MaybeRefMut::Ref(ref r) => &***r,
         };
         let value = base
-            .path(self.path)
+            .reflect_path(self.path)
             .expect("paths are checked in `append_path`");
         value
     }
@@ -351,7 +355,7 @@ impl<'a> DerefMut for ReflectValueRefBorrowMut<'a> {
             MaybeRefMut::Ref(r) => &mut ***r,
         };
         let value = base
-            .path_mut(self.path)
+            .reflect_path_mut(self.path)
             .expect("paths are checked in `append_path`");
         value
     }
@@ -393,7 +397,7 @@ impl ReflectValueRef {
                 MaybeRef::Direct(r) => r,
                 MaybeRef::Ref(ref r) => &***r,
             };
-            base.path(&new.path)
+            base.reflect_path(&new.path)
                 .map_err(|e| ReflectValueRefError::InvalidPath {
                     type_name: base.type_name().to_string(),
                     error_message: e.to_string(),
